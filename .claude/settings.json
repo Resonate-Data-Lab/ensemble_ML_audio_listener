@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source /Users/yasmeen/Desktop/listener-Prototye/.venv/bin/activate)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(ffprobe *)"
+    ]
+  }
+}

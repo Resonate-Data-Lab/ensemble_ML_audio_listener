@@ -1,0 +1,5 @@
+streamlit>=1.38
+numpy>=1.26,<2.5  # numba (via librosa, a panns-inference dependency) caps numpy
+torch>=2.6
+panns-inference>=0.1.1
+anthropic>=0.121  # optional: used for description wording only when ANTHROPIC_API_KEY is set

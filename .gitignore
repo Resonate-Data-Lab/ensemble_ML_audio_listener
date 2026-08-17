@@ -1,0 +1,9 @@
+.venv/
+data/uploads/
+data/clips/
+data/compositions/
+data/logs/
+__pycache__/
+*.pyc
+.DS_Store
+.claude/settings.local.json
