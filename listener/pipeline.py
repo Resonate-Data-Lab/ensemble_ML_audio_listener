@@ -25,11 +25,13 @@ SAME already-computed windows, without re-running the classifier.
 """
 from pathlib import Path
 
-from .analysis import classify_clip, clip_contains_speech
+from .analysis import clip_contains_speech
 from .audio_classifier import get_classifier
 from .clipping import Clip, extract_clips
 from .research_log import log_analysis_run
-from .selection import Candidate, MAX_CANDIDATES, build_candidate_pool, select_diverse_candidates
+from .selection import (
+    Candidate, MAX_CANDIDATES, build_candidate_pool, count_regions, select_diverse_candidates,
+)
 
 SHORTLIST_SIZE = 25  # generous shortlist to draw backfill candidates from
 
@@ -44,6 +46,7 @@ def generate_verified_candidates(
     run_id: str = None,
     analysis_number: int = 1,
     previously_selected_starts: set = None,
+    previously_selected_embeddings: list = None,
 ) -> tuple:
     """Return up to MAX_CANDIDATES (candidate, clip) pairs whose exported clips
     contain no identifiable speech, in chronological order.
@@ -53,22 +56,25 @@ def generate_verified_candidates(
     shortlist. If the recording doesn't have enough non-speech alternatives,
     fewer than MAX_CANDIDATES are returned rather than fabricated.
 
-    previously_selected_starts: passed straight through to
-    select_diverse_candidates (see there) so "Analyze Again" steers away from
-    windows already shown in an earlier run on this recording.
+    previously_selected_starts / previously_selected_embeddings: passed
+    straight through to select_diverse_candidates (see there) so "Analyze
+    Again" steers away from windows already shown in an earlier run on this
+    recording -- both by exact start-time match and by acoustic similarity.
     """
     pool = build_candidate_pool(windows)
-    speech_excluded_windows = sum(1 for w in windows if w.labels and w.has_speech)
+    speech_excluded_windows = sum(1 for w in windows if w.has_speech)
+    region_count = count_regions(pool)  # how many distinct sonic regions existed BEFORE selection
 
     shortlist = select_diverse_candidates(
         pool, count=SHORTLIST_SIZE, weights=weights, jitter_seed=jitter_seed,
         previously_selected_starts=previously_selected_starts,
+        previously_selected_embeddings=previously_selected_embeddings,
     )
     if not shortlist:
         if run_id:
             log_analysis_run(
                 run_id, analysis_number, jitter_seed, type(get_classifier()).__name__,
-                len(windows), speech_excluded_windows, len(pool), 0, 0, [],
+                len(windows), speech_excluded_windows, len(pool), region_count, 0, 0, [],
             )
         return [], []
 
@@ -85,12 +91,6 @@ def generate_verified_candidates(
             speech_clip_excluded += 1
             Path(clip.filepath).unlink(missing_ok=True)
             continue
-        # Labels shown to the user must describe the actual exported clip, not
-        # the original analysis window -- clip extraction can move the
-        # boundaries by a couple of seconds (see clipping._clip_bounds), so the
-        # window's labels may no longer match what's actually in this audio.
-        # This has no effect on ranking/diversity: selection already ran above.
-        candidate.labels = classify_clip(clip.filepath)
         candidates.append(candidate)
         clips.append(clip)
 
@@ -103,6 +103,7 @@ def generate_verified_candidates(
             total_windows=len(windows),
             speech_excluded_windows=speech_excluded_windows,
             pool_size=len(pool),
+            region_count=region_count,
             shortlist_size=len(shortlist),
             speech_clip_excluded=speech_clip_excluded,
             final_candidates=candidates,

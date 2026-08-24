@@ -1,21 +1,36 @@
-"""Step 4-5: sound-event tagging, speech detection, and change signals.
+"""Step 4-5: audio representation extraction, speech gating, and change signals.
 
-Runs a pretrained sound-event classifier (see audio_classifier.py -- PANNs
-Cnn14 today, swappable later) across the recording in overlapping windows,
-producing a time-ordered series of WindowAnalysis records. Each one carries:
+Version 6. Runs a pretrained sound classifier (see audio_classifier.py -- PANNs
+Cnn14 today, swappable later) across the recording in overlapping windows, but
+-- as of V6 -- ONLY for two things:
 
-  - the sound-event labels detected in that window (for diversity/rarity)
-  - whether speech was detected anywhere among those labels, not only as the
-    top one (so Step 6 can avoid it even when it's a quieter background sound)
-  - an embedding vector (so Step 6 can measure how much the soundscape
-    changes from one moment to the next -- novelty and contrast)
+  1. its embedding (a general-purpose representation of each window's acoustic
+     content, used downstream for novelty/contrast/diversity -- see selection.py)
+  2. a narrow, binary check of whether any of its speech-related output classes
+     crosses a presence threshold (see _has_speech below)
 
-This module only detects and describes what is acoustically present. It does
-not judge importance, rank, or select candidates -- that happens in Step 6.
+V5 and earlier also kept PANNs' full top-K AudioSet label list per window and
+used label identity/confidence/frequency as scoring features (clarity, rarity,
+layering). V6 removes that entirely: the goal is for the system to surface
+distinctive sonic moments without needing to know or name what a sound is, so
+"what does PANNs think this is called" no longer feeds selection anywhere.
+Three signal-level features computed directly from each window's raw audio --
+layering (spectral band entropy), distinctiveness (spectral crest), and
+temporal interest (intra-window energy flux) -- replace what label counts and
+label confidence used to stand in for. See selection.py's module docstring
+for how these combine with the embedding-based novelty/contrast into a score,
+and for how V6.2 groups near-identical adjacent windows into one sonic region
+before ranking (a V6.1 attempt at a sixth "Sonic Interpretability" dimension
+was tried and reverted here -- see selection.py's docstring for why).
+
+The one place PANNs' classification output (not just its embedding) is still
+consulted is the speech gate below. This is a deliberate, flagged exception,
+not an oversight -- see _has_speech's docstring for why it stays and what it
+is scoped to.
 
 Window length (WINDOW_SECONDS) is 4.0s rather than a shorter slice on
 purpose: PANNs Cnn14 (like most AudioSet taggers) was trained on ~10s clips,
-and classification confidence measurably drops on much shorter windows,
+and its embedding quality measurably drops on much shorter windows,
 especially for events with an attack/decay shape (a door closing, footsteps)
 that need a bit of time to fully register.
 """
@@ -29,8 +44,6 @@ from .segmentation import TARGET_SAMPLE_RATE, AudioChunk, decode_to_waveform, se
 
 WINDOW_SECONDS = 4.0
 HOP_SECONDS = 2.0
-LABEL_SCORE_THRESHOLD = 0.10  # minimum confidence to count a label as "present"
-TOP_K_LABELS = 5
 
 # Verbal / language-bearing human vocalizations -- the goal is NO SPEECH, not NO
 # HUMAN ACTIVITY, so this is deliberately narrower than AudioSet's full "Human
@@ -44,6 +57,17 @@ TOP_K_LABELS = 5
 # -- laughter, crying, screaming, singing/chanting/humming, coughing, breathing,
 # and similar "Human sounds" classes. A laugh or a scream is human, but it isn't
 # someone talking, so it doesn't get filtered out on that basis alone.
+#
+# FLAGGED (see module docstring / Step 6 design notes, V6): this set of class
+# NAMES is still matched against PANNs' AudioSet class vocabulary, which makes
+# the speech gate the one remaining place classification output (not just the
+# embedding) is used. A fully label-independent speech detector (e.g. a
+# dedicated VAD model) would remove this too, but that means adding a new
+# model dependency, which V6 was explicitly asked not to do without a
+# separate decision -- so this stays, narrowly scoped to "is any of these
+# specific classes present", never exposed as a general label and never used
+# for scoring. If you want this gone too, that is a real follow-up, not a
+# free removal.
 SPEECH_LABELS = {
     "Speech", "Male speech, man speaking", "Female speech, woman speaking",
     "Child speech, kid speaking", "Conversation", "Narration, monologue",
@@ -58,13 +82,39 @@ SPEECH_LABELS = {
 # notice speech is IDENTIFIABLE somewhere, not that it's the single loudest thing.
 SPEECH_PRESENCE_THRESHOLD = 0.15
 
+# ---------------------------------------------------------------------------
+# Signal-level feature parameters (V6). All computed directly from a window's
+# raw samples -- no classifier, no labels -- and are only min-max-normalized
+# into final 0-1 scores later, across the whole eligible pool (see
+# selection.build_candidate_pool). Raw values stored on WindowAnalysis are
+# therefore recording-relative, not universal/absolute measures.
+# ---------------------------------------------------------------------------
+
+# Layering: how many independent frequency bands carry real, comparable energy
+# at once. Roughly sub-bass through upper-mid/presence range for
+# environmental recordings; deliberately coarse (6 bands) rather than a full
+# spectrogram, since the question is "how spread out is the energy", not
+# precise spectral shape.
+LAYERING_BANDS_HZ = [(20, 150), (150, 400), (400, 1000), (1000, 2500), (2500, 6000), (6000, 16000)]
+
+# Temporal interest: split each window into short sub-frames and look at how
+# much the energy envelope moves within the window itself (as opposed to
+# novelty/contrast, which compare BETWEEN windows). 0.5s sub-frames give 8
+# per 4s window -- enough to catch an onset/offset or a rhythmic repeat
+# without being so short that it's just measuring noise-floor jitter.
+TEMPORAL_SUBFRAME_SECONDS = 0.5
+
 
 @dataclass
 class WindowAnalysis:
     start_seconds: float
-    labels: list  # [(label, score), ...] above threshold, sorted by score desc
-    has_speech: bool  # any SPEECH_LABELS entry present in `labels`, not just the top one
-    embedding: np.ndarray  # classifier embedding, for novelty/contrast in Step 6
+    has_speech: bool  # narrow speech-class check only -- see SPEECH_LABELS docstring above
+    embedding: np.ndarray  # classifier embedding, for novelty/contrast/diversity/regions in Step 6
+    # Raw (un-normalized) signal-level features -- see the parameter block
+    # above. Normalized into final 0-1 scores in selection.build_candidate_pool.
+    layering_raw: float
+    distinctiveness_raw: float
+    temporal_interest_raw: float
 
 
 def _windows_for_chunk(chunk: AudioChunk) -> list[tuple[float, np.ndarray]]:
@@ -91,16 +141,100 @@ def _windows_for_chunk(chunk: AudioChunk) -> list[tuple[float, np.ndarray]]:
     return windows
 
 
+def _speech_class_indices(classifier) -> np.ndarray:
+    return np.array([i for i, label in enumerate(classifier.labels) if label in SPEECH_LABELS])
+
+
+def _has_speech(scores: np.ndarray, speech_indices: np.ndarray) -> bool:
+    """Narrow binary check: does any speech-class score cross the presence bar?
+
+    Deliberately does NOT extract or expose a general label list -- this reads
+    only the fixed subset of class scores named in SPEECH_LABELS, the same way
+    clip_contains_speech() below checks a final exported clip. See the
+    SPEECH_LABELS docstring for why this one classification-based check
+    remains while general label-based scoring does not.
+    """
+    if speech_indices.size == 0:
+        return False
+    return bool(np.max(scores[speech_indices]) >= SPEECH_PRESENCE_THRESHOLD)
+
+
+def _magnitude_spectrum(samples: np.ndarray) -> np.ndarray:
+    """Shared FFT magnitude spectrum, computed once per window and reused by
+    every spectral feature below (layering, distinctiveness) instead of each
+    recomputing its own."""
+    return np.abs(np.fft.rfft(samples * np.hanning(len(samples))))
+
+
+def _band_energy_entropy(spectrum: np.ndarray, freqs: np.ndarray) -> float:
+    """Layering (raw): Shannon entropy of energy spread across LAYERING_BANDS_HZ.
+
+    High when energy is spread roughly evenly across many bands (several
+    concurrent acoustic components/textures at once -- e.g. broadband rain
+    plus a tonal bird call plus low rumble). Low when one band dominates (a
+    single, spectrally narrow source). Self-normalizing to [0, 1] via
+    max-entropy division, so no recording-wide calibration is needed here --
+    final pool-relative normalization still happens in build_candidate_pool
+    for consistency with the other dimensions.
+    """
+    band_energy = []
+    for lo, hi in LAYERING_BANDS_HZ:
+        mask = (freqs >= lo) & (freqs < hi)
+        band_energy.append(float(np.sqrt(np.mean(spectrum[mask] ** 2))) if mask.any() else 0.0)
+    band_energy = np.asarray(band_energy)
+
+    total = band_energy.sum()
+    if total <= 1e-9:
+        return 0.0
+    p = band_energy[band_energy > 0] / total
+    entropy = float(-np.sum(p * np.log(p)))
+    max_entropy = np.log(len(LAYERING_BANDS_HZ))
+    return entropy / max_entropy if max_entropy > 0 else 0.0
+
+
+def _spectral_crest(spectrum: np.ndarray) -> float:
+    """Distinctiveness (raw): peak-to-mean ratio of the magnitude spectrum.
+
+    High when a segment has a strong, well-defined spectral character (one or
+    two prominent components clearly above the rest) -- a segment that
+    "stands out" acoustically regardless of whether anything can name it. Low
+    for a diffuse, undifferentiated texture where energy is smeared evenly
+    across frequency. This is about acoustic prominence, never about
+    classifier confidence.
+    """
+    mean = float(spectrum.mean()) + 1e-9
+    return float(spectrum.max()) / mean
+
+
+def _temporal_flux(samples: np.ndarray, sample_rate: int) -> float:
+    """Temporal interest (raw): how much the energy envelope moves WITHIN
+    this window, not between windows (that's novelty/contrast's job).
+
+    Splits the window into ~8 sub-frames and takes the mean absolute
+    frame-to-frame change in RMS -- high for something appearing, vanishing,
+    or repeating during the window; near zero for static, unchanging texture
+    (room tone, steady rain) even if that texture is loud.
+    """
+    frame_len = max(1, int(TEMPORAL_SUBFRAME_SECONDS * sample_rate))
+    n_frames = len(samples) // frame_len
+    if n_frames < 2:
+        return 0.0
+    trimmed = samples[: n_frames * frame_len].reshape(n_frames, frame_len)
+    envelope = np.sqrt(np.mean(trimmed ** 2, axis=1) + 1e-12)
+    return float(np.mean(np.abs(np.diff(envelope))))
+
+
 def analyze_recording(
     filepath: str,
     progress_callback: Optional[Callable[[float], None]] = None,
 ) -> list[WindowAnalysis]:
-    """Run windowed sound-event analysis across the full recording.
+    """Run windowed audio-representation analysis across the full recording.
 
     Returns WindowAnalysis records in chronological order, deduplicated
     across the small overlap between consecutive Step-3 chunks.
     """
     classifier = get_classifier()
+    speech_indices = _speech_class_indices(classifier)
     chunks = segment_recording(filepath)
 
     results: list[WindowAnalysis] = []
@@ -112,29 +246,23 @@ def analyze_recording(
         batch = np.stack([w[1] for w in local_windows])
         clipwise_output, embeddings = classifier.classify_batch(batch)
 
-        for (local_start, _samples), scores, embedding in zip(local_windows, clipwise_output, embeddings):
+        for (local_start, samples), scores, embedding in zip(local_windows, clipwise_output, embeddings):
             absolute_start = chunk.start_seconds + local_start
             if absolute_start <= last_kept_start + min_spacing:
                 continue
             last_kept_start = absolute_start
 
-            top_idx = np.argsort(scores)[::-1][:TOP_K_LABELS]
-            labels = [
-                (classifier.labels[i], float(scores[i]))
-                for i in top_idx
-                if scores[i] >= LABEL_SCORE_THRESHOLD
-            ]
+            spectrum = _magnitude_spectrum(samples)
+            freqs = np.fft.rfftfreq(len(samples), 1.0 / TARGET_SAMPLE_RATE)
 
             results.append(
                 WindowAnalysis(
                     start_seconds=absolute_start,
-                    labels=labels,
-                    # Any detected label being speech is enough to flag the window --
-                    # not just whether speech happens to be the single highest score.
-                    # A quiet "person talking" under a louder environmental sound would
-                    # still show up here as long as it cleared LABEL_SCORE_THRESHOLD.
-                    has_speech=any(label in SPEECH_LABELS for label, _ in labels),
+                    has_speech=_has_speech(scores, speech_indices),
                     embedding=embedding,
+                    layering_raw=_band_energy_entropy(spectrum, freqs),
+                    distinctiveness_raw=_spectral_crest(spectrum),
+                    temporal_interest_raw=_temporal_flux(samples, TARGET_SAMPLE_RATE),
                 )
             )
 
@@ -189,45 +317,20 @@ def clip_contains_speech(filepath: str) -> bool:
     sub-windows rather than as one whole-clip average, so a brief or quiet run of
     speech under a louder environmental sound is still caught: any sub-window
     scoring above SPEECH_PRESENCE_THRESHOLD on any speech class fails the clip.
+
+    Same flagged exception as _has_speech above: this is classification-based,
+    kept narrowly for the speech gate only.
     """
     classifier = get_classifier()
     waveform = decode_to_waveform(filepath, sample_rate=TARGET_SAMPLE_RATE)
     if len(waveform) == 0:
         return False
 
-    speech_indices = [i for i, label in enumerate(classifier.labels) if label in SPEECH_LABELS]
-    if not speech_indices:
+    speech_indices = _speech_class_indices(classifier)
+    if speech_indices.size == 0:
         return False
 
     segments = _fixed_sub_windows(waveform, SPEECH_CHECK_WINDOW_SECONDS, SPEECH_CHECK_HOP_SECONDS, TARGET_SAMPLE_RATE)
     batch = np.stack(segments)
     scores, _embeddings = classifier.classify_batch(batch)
     return bool(np.max(scores[:, speech_indices]) >= SPEECH_PRESENCE_THRESHOLD)
-
-
-def classify_clip(filepath: str) -> list:
-    """Re-classify a FINAL EXPORTED CLIP as a whole, for display purposes.
-
-    Clip extraction (Step 7) can reposition a candidate's boundaries by a couple
-    of seconds from wherever it was originally classified (see
-    clipping._clip_bounds), so the labels captured during analyze_recording()
-    may no longer accurately describe what's actually inside the exported clip.
-    This re-classifies the exact audio that will be shown/played, so displayed
-    labels always correspond to the final clip rather than the original
-    analysis window. Uses the same TOP_K_LABELS / LABEL_SCORE_THRESHOLD as
-    analyze_recording, so "detected" means the same thing everywhere in the
-    pipeline. Does not affect candidate ranking/selection -- that has already
-    happened by the time this runs (see pipeline.generate_verified_candidates).
-    """
-    classifier = get_classifier()
-    waveform = decode_to_waveform(filepath, sample_rate=TARGET_SAMPLE_RATE)
-    if len(waveform) == 0:
-        return []
-
-    scores, _embedding = classifier.classify_one(waveform)
-    top_idx = np.argsort(scores)[::-1][:TOP_K_LABELS]
-    return [
-        (classifier.labels[i], float(scores[i]))
-        for i in top_idx
-        if scores[i] >= LABEL_SCORE_THRESHOLD
-    ]

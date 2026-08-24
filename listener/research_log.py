@@ -25,6 +25,7 @@ def log_analysis_run(
     total_windows: int,
     speech_excluded_windows: int,
     pool_size: int,
+    region_count: int,
     shortlist_size: int,
     speech_clip_excluded: int,
     final_candidates: list,
@@ -34,6 +35,14 @@ def log_analysis_run(
     candidates were considered and why some were excluded, and the full
     component-score breakdown behind each final pick. Research transparency
     -- never shown in the main UI. Never raises; logging shouldn't break the app.
+
+    region_count (V6.2): how many distinct sonic regions build_candidate_pool's
+    output was segmented into BEFORE diversity selection ran (see
+    selection._segment_into_regions) -- i.e. the true number of acoustically
+    distinct moments available. Compare against each candidate's
+    region_window_count below (how many raw windows that one pick's region
+    collapsed) to see how much redundant near-duplicate content one candidate
+    is standing in for.
     """
     try:
         ANALYSIS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -46,13 +55,14 @@ def log_analysis_run(
             "total_windows_analyzed": total_windows,
             "excluded_speech_windows": speech_excluded_windows,
             "pool_size": pool_size,
+            "region_count": region_count,
             "shortlist_size": shortlist_size,
             "excluded_speech_in_clip": speech_clip_excluded,
             "final_count": len(final_candidates),
             "final_candidates": [
                 {
                     "start_seconds": c.start_seconds,
-                    "top_label": c.labels[0][0] if c.labels else None,
+                    "region_window_count": c.region_window_count,
                     "score": c.score,
                     "component_scores": c.scores,
                 }

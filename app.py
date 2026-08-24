@@ -1,4 +1,4 @@
-"""Listener -- Version 5.
+"""Listener -- Version 6.
 
 Version 1 transforms an existing environmental recording into ~10 candidate
 sonic moments (AI surfaces). Version 2 lets the person decide which ones to
@@ -7,13 +7,21 @@ reorder, optionally crossfade, or remove -- into a composition of their own
 making (human edits). Version 4 refined transitions/downloads. Version 5 lets
 them explore a candidate through a chosen affective direction (Calm,
 Nostalgic, ...) -- the system transforms the SAME clip, it does not decide
-what the clip already means.
+what the clip already means. Version 6 removes AudioSet classification
+labels entirely, from both scoring and the interface: PANNs Cnn14 is still
+used, but only for its embedding (novelty/contrast/diversity) and a narrow
+speech gate -- never for "what is this sound called", and never displayed,
+even in Developer mode. Three new signal-level dimensions (layering,
+distinctiveness, temporal interest) replace label-based clarity and rarity.
+See listener/analysis.py and listener/selection.py.
 
 AI surfaces. Humans interpret. Humans edit. The system never labels a sound
-as meaningful, important, or emotional -- only what was acoustically
-detected. The AI's original candidate list is never reordered, filtered, or
-re-ranked based on what the person keeps or how they edit it, so the three
-can be compared: what the AI noticed, what the person chose, and how they
+as meaningful, important, or emotional, or names what it acoustically
+detected: a moment is surfaced because it is acoustically distinctive, not
+because the system could name or classify it.
+The AI's original candidate list is never reordered, filtered, or re-ranked
+based on what the person keeps or how they edit it, so the three can be
+compared: what the AI noticed, what the person chose, and how they
 transformed it. There is no automatic sequencing or soundscape generation
 anywhere in this file -- every ordering, trim, and crossfade decision below
 is the user's own, made through an explicit control. The Version 5 affective
@@ -32,7 +40,6 @@ from listener.analysis import WINDOW_SECONDS, analyze_recording
 from listener.audio_io import SUPPORTED_EXTENSIONS, format_timestamp, load_recording
 from listener.clipping import CLIP_DIR
 from listener.composition import COMPOSITION_DIR, CompositionItem, build_composition
-from listener.description import describe_candidate
 from listener.pipeline import generate_verified_candidates
 from listener.research_log import log_composition_snapshot, log_decision
 
@@ -40,6 +47,16 @@ st.set_page_config(page_title="Listener", page_icon="🎧")
 
 st.title("LISTENER")
 st.caption("Surface moments from an everyday sound recording.")
+
+dev_mode = st.checkbox(
+    "Developer mode",
+    value=False,
+    help="Shows the per-dimension scoring breakdown behind each candidate "
+    "(debug/research transparency only). Off by default: participants only "
+    "hear each candidate and decide for themselves what it is or means -- "
+    "the interface never names or labels a sound as the reason it was "
+    "surfaced.",
+)
 
 st.subheader("Upload one audio recording")
 uploaded_file = st.file_uploader(
@@ -56,7 +73,8 @@ if uploaded_file is not None:
         # a new upload invalidates any previous analysis, decisions, and edits
         for key in (
             "results", "decisions", "run_id", "composition", "removed", "show_editor",
-            "windows", "analysis_number", "shown_window_starts", "affect_state",
+            "windows", "analysis_number", "shown_window_starts", "shown_window_embeddings",
+            "affect_state",
         ):
             st.session_state.pop(key, None)
 
@@ -79,17 +97,22 @@ if uploaded_file is not None:
         st.session_state["affect_state"] = {}
         windows = st.session_state["windows"]
         previously_selected_starts = st.session_state.get("shown_window_starts", set())
+        previously_selected_embeddings = st.session_state.get("shown_window_embeddings", [])
         candidates, clips = generate_verified_candidates(
             recording.filepath, recording.duration_seconds, windows, WINDOW_SECONDS,
             jitter_seed=jitter_seed, run_id=st.session_state["run_id"], analysis_number=analysis_number,
             previously_selected_starts=previously_selected_starts,
+            previously_selected_embeddings=previously_selected_embeddings,
         )
-        descriptions = [describe_candidate(c) for c in candidates]
         # accumulate across runs (not replace) so "Analyze Again" keeps steering
-        # away from everything shown so far this session, not just the last run
+        # away from everything shown so far this session, not just the last run --
+        # both the exact windows shown (starts) and their acoustic neighborhood
+        # (embeddings), so a near-duplicate moment a few seconds later is also
+        # discouraged, not just an exact repeat. See selection.py, V6.
         st.session_state["shown_window_starts"] = previously_selected_starts | {c.start_seconds for c in candidates}
+        st.session_state["shown_window_embeddings"] = previously_selected_embeddings + [c.embedding for c in candidates]
 
-        st.session_state["results"] = list(zip(clips, descriptions))
+        st.session_state["results"] = list(zip(clips, candidates))
         st.session_state["decisions"] = {}  # candidate_id -> "kept" | "discarded"
         st.session_state["decision_sequence"] = 0
         st.session_state["analysis_number"] = analysis_number
@@ -136,26 +159,35 @@ if uploaded_file is not None:
                 _select_and_extract(analysis_number=analysis_number + 1, jitter_seed=analysis_number)
             st.rerun()
 
-        for i, (clip, description) in enumerate(results, start=1):
+        for i, (clip, candidate) in enumerate(results, start=1):
             st.divider()
             st.markdown(f"**Candidate {i:02d}**")
             st.audio(clip.filepath)
-            st.write(description.text)
-            if description.detected_sounds:
-                st.write("Detected sounds:")
-                for sound in description.detected_sounds:
-                    label = sound.display_label
-                    st.write(f"- {label[0].upper()}{label[1:]}")
             duration = clip.end_seconds - clip.start_seconds
             st.write(
                 f"{format_timestamp(clip.start_seconds)} – {format_timestamp(clip.end_seconds)} "
                 f"({duration:.1f}s)"
             )
-            if description.detected_sounds:
-                with st.expander("Debug: raw classifier output"):
-                    st.caption("Research transparency -- what PANNs actually returned for this exact clip.")
-                    for sound in description.detected_sounds:
-                        st.write(f"- `{sound.raw_label}` -- confidence {sound.confidence:.2f} -> \"{sound.display_label}\"")
+            # Nothing about what a sound "is" or "means" is shown here by default --
+            # only what it sounds like and when it happened. The scoring breakdown
+            # exists only for research transparency, behind Developer mode (see
+            # checkbox above); there is no sound-label display anywhere (see V6).
+            if dev_mode:
+                with st.expander("Developer info (not shown to participants)"):
+                    st.caption(
+                        "Scoring breakdown behind this candidate -- see selection.py, V6."
+                    )
+                    scores = candidate.scores
+                    st.write(
+                        f"- Novelty: {scores.get('novelty', float('nan')):.2f}\n"
+                        f"- Contrast: {scores.get('contrast', float('nan')):.2f}\n"
+                        f"- Layering: {scores.get('layering', float('nan')):.2f}\n"
+                        f"- Distinctiveness: {scores.get('distinctiveness', float('nan')):.2f}\n"
+                        f"- Temporal Interest: {scores.get('temporal_interest', float('nan')):.2f}\n"
+                        f"- Overall: {candidate.score:.2f}\n"
+                        f"- Sonic region size: {candidate.region_window_count} window"
+                        f"{'s' if candidate.region_window_count != 1 else ''} collapsed into this candidate"
+                    )
 
             keep_col, discard_col, download_col = st.columns(3)
             if keep_col.button("Keep", key=f"keep_{i}"):
@@ -234,12 +266,11 @@ if uploaded_file is not None:
         st.markdown("### My Selected Sounds")
         st.write(f"You selected {len(kept_ids)} sounds.")
 
-        for i, (clip, description) in enumerate(results, start=1):
+        for i, (clip, _candidate) in enumerate(results, start=1):
             if i not in kept_ids:
                 continue
             st.markdown(f"**Candidate {i:02d}**")
             st.audio(clip.filepath)
-            st.write(description.text)
             st.write(f"{format_timestamp(clip.start_seconds)} – {format_timestamp(clip.end_seconds)}")
 
         # ------------------------------------------------------------------
@@ -250,7 +281,7 @@ if uploaded_file is not None:
                 if "composition" not in st.session_state:
                     composition = []
                     for i in kept_ids:
-                        clip, _description = results[i - 1]
+                        clip, _candidate = results[i - 1]
                         clip_duration = clip.end_seconds - clip.start_seconds
                         composition.append(
                             CompositionItem(
@@ -271,7 +302,6 @@ if uploaded_file is not None:
         if st.session_state.get("show_editor") and st.session_state.get("composition") is not None:
             composition = st.session_state["composition"]
             removed = st.session_state["removed"]
-            descriptions_by_id = {i: results[i - 1][1] for i in range(1, len(results) + 1)}
 
             def _record_composition_change() -> None:
                 # every trim/reorder/remove/restore/crossfade edit calls this, so the
@@ -293,7 +323,6 @@ if uploaded_file is not None:
                 st.divider()
                 clip_duration = item.clip_end_seconds - item.clip_start_seconds
                 st.markdown(f"**Sound {item.candidate_id}** (position {pos + 1} of {len(composition)})")
-                st.write(descriptions_by_id[item.candidate_id].text)
 
                 # A. play (native play/pause/replay controls), reflecting the current trim
                 st.audio(item.clip_filepath, start_time=item.trim_start, end_time=item.trim_end)
@@ -351,7 +380,7 @@ if uploaded_file is not None:
                 st.caption("These stay part of your selected sounds -- restore any of them here.")
                 for item in list(removed):
                     label_col, restore_col = st.columns([3, 1])
-                    label_col.write(f"Sound {item.candidate_id} -- {descriptions_by_id[item.candidate_id].text}")
+                    label_col.write(f"Sound {item.candidate_id}")
                     if restore_col.button("Restore", key=f"restore_{item.candidate_id}"):
                         removed.remove(item)
                         composition.append(item)

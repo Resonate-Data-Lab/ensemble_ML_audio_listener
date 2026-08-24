@@ -9,7 +9,6 @@ rewriting earlier stages:
     analysis      -- V1 Step 4-5: detect sound events, changes, speech
     selection     -- V1 Step 6:   rank and choose diverse candidate moments
     clipping      -- V1 Step 7:   extract ~5s clips from the original recording
-    description   -- V1 Step 8:   neutral descriptions + sound labels
     composition   -- V3:          trim/reorder/crossfade the user's kept clips into one file
     research_log  -- V2/V3:       append-only logs of Keep/Discard and editing decisions
 """
