@@ -1,140 +1,70 @@
-# LISTENER 🎧
+Listener
 
-**LISTENER** is an interactive AI-assisted audio exploration and composition tool built with Python and Streamlit.
+Surfaces candidate sound moments from an everyday audio recording and lets a person decide which ones are worth keeping.
 
-It takes everyday environmental audio recordings and surfaces **candidate sonic moments** ("AI surfaces") based on signal-level acoustic properties (novelty, contrast, temporal interest, distinctiveness, and layering). Users can then review, interpret, apply affective sonic transformations (e.g., *Calm*, *Nostalgic*, *Dreamy*), edit, reorder, crossfade, and build custom audio compositions.
+Listener analyzes a long ambient recording, proposes short clips it judges to be acoustically distinct, and hands them to the listener to keep or discard. The person then trims, reorders, and crossfades what they kept into a short composition. The system does not decide what a sound means — it only surfaces possibilities.
 
----
+Installation
 
-## 🌟 Key Features & Philosophy
+Requires Python 3.9 or later.
 
-- **Acoustic-First Candidate Scoring:** Candidate moments are detected and surfaced using PANNs (Cnn14 embeddings) for acoustic feature contrast and novelty—not by subjective or automated semantic labeling.
-- **Human-Centric Interpretation:** AI surfaces the moments; humans decide what they mean, which ones to keep, and how to sequence or edit them.
-- **Affective Tone Transformations:** Apply user-guided acoustic tone directions (*Calm*, *Nostalgic*, *Dreamy*, *Mysterious*, etc.) to transform audio clips without altering their underlying core identity.
-- **Interactive Web Interface:** Streamlit UI allowing real-time playback, candidate selection, trimming, crossfading, multi-track composition building, and download capabilities.
-- **Developer Transparency Mode:** Optional toggle to inspect raw model feature outputs and scoring breakdowns behind candidate selection.
-
----
-
-## 🛠️ Prerequisites
-
-Before running LISTENER, ensure you have the following installed on your system:
-
-- **Python:** Version `3.10` or higher (Python 3.11 or 3.12 recommended)
-- **FFmpeg:** Required for audio reading/processing by `librosa` and PyTorch.
-  - **macOS (via Homebrew):** `brew install ffmpeg`
-  - **Ubuntu/Debian:** `sudo apt install ffmpeg`
-  - **Windows (via Chocolatey):** `choco install ffmpeg`
-
----
-
-## 🚀 Installation Guide
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/Resonate-Data-Lab/ensemble_ML_audio_listener.git
+bash
+git clone https://github.com/<your-org>/ensemble_ML_audio_listener.git
 cd ensemble_ML_audio_listener
-```
 
-### 2. Set Up a Virtual Environment
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-It is recommended to use a virtual environment:
-
-```bash
-# Create a virtual environment named .venv
-python3 -m venv .venv
-
-# Activate the virtual environment
-# On macOS / Linux:
-source .venv/bin/activate
-
-# On Windows (Command Prompt):
-# .venv\Scripts\activate.bat
-
-# On Windows (PowerShell):
-# .venv\Scripts\Activate.ps1
-```
-
-### 3. Install Dependencies
-
-Install all required Python packages using `requirements.txt`:
-
-```bash
-pip install --upgrade pip
 pip install -r requirements.txt
-```
 
-> **Note:** On first run, PANNs (`panns-inference`) will automatically download pre-trained model weights (`Cnn14_mAP=0.431.pth`) to your home folder (`~/panns_data/`).
+PANNs CNN14 model weights download automatically on first run, so the first analysis takes longer than later ones.
 
----
-
-## 🖥️ Running the Application
-
-To launch the LISTENER web application, execute:
-
-```bash
+Usage
+bash
 streamlit run app.py
-```
 
-Once started, open your web browser and navigate to:
-```
-http://localhost:8501
-```
+Then in the browser:
 
----
+Upload one recording (MP3, WAV, or M4A).
+Press Analyze Recording. The system returns up to ten candidates of about five seconds each.
+Play each one and choose Keep or Discard.
+Optionally open Explore an emotional interpretation to hear a clip transformed through an affective direction, with the original kept alongside.
+Open Edit Selected Sounds to trim, reorder, remove, restore, and crossfade.
+Press Preview Composition to render the result.
 
-## 📖 How to Use LISTENER
+Clips and compositions are written to data/.
 
-1. **Upload Recording:**
-   - Upload any environmental audio file (`.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a`).
-2. **Analyze Recording:**
-   - Click **Analyze Recording**. LISTENER analyzes candidate windows across your audio file using signal distinctiveness, layering, and temporal novelty metrics.
-3. **Explore & Select Moments:**
-   - Listen to each candidate clip surfaced by the AI.
-   - Choose which clips to **Keep** or **Discard**.
-4. **Apply Affective Transformations (Optional):**
-   - Transform selected clips using target affective tones (*Calm*, *Nostalgic*, *Energetic*, etc.).
-5. **Edit & Sequence Composition:**
-   - Open the **Composition Editor** to arrange your saved clips.
-   - Adjust trim start/end times, reorder clips, or configure crossfades between moments.
-6. **Export & Download:**
-   - Listen to your completed composition and download the final combined audio file along with your research/decision log snapshot.
+Features
+Candidate surfacing — proposes moments that stand out acoustically, so the person doesn't scrub through the whole recording.
+Human curation — nothing enters a composition without being kept by the person.
+Editing workspace — trim, reorder, remove, restore, crossfade. Removing a clip from the composition doesn't remove it from the kept set.
+Affective transformation — twelve optional directions (Calm, Nostalgic, Joyful, Melancholic, Tense, Mysterious, Dreamy, Lonely, Intimate, Energetic, Uneasy, Serene), applied per clip.
+Research logging — what the system surfaced and what the person kept are recorded separately.
 
----
+Candidates are ranked on acoustic properties rather than classification labels: novelty, contrast, layering, distinctiveness, and temporal interest. These are engineering proxies and have not been validated against what people actually find worth keeping.
 
-## 📁 Repository Structure
+Configuration
 
-```
+Anthropic API key (optional) — enables auto-generated textual descriptions of candidates. Everything else works without it.
+
+bash
+export ANTHROPIC_API_KEY="your-api-key-here"
+Project structure
 ensemble_ML_audio_listener/
-├── app.py                  # Main Streamlit web application interface
-├── requirements.txt        # Python dependency specifications
-├── README.md               # Project documentation
-├── listener/               # Core Python library
-│   ├── analysis.py         # Signal analysis, windowing, and scoring logic
-│   ├── affect.py           # Affective tone transformation functions
-│   ├── audio_classifier.py # PANNs CNN model loading & embedding extraction
-│   ├── audio_io.py         # Audio file loading, saving, and timestamp formatting
-│   ├── clipping.py         # Audio clip extraction and trimming utilities
-│   ├── composition.py      # Multi-clip composition rendering & crossfading
-│   ├── pipeline.py         # Verification and candidate generation pipeline
-│   ├── research_log.py     # Logging decision history and session snapshots
-│   └── selection.py        # Candidate selection and re-ranking algorithms
-└── data/                   # Temporary directory for saved clips & compositions
-```
+├── app.py                   # Streamlit web application interface
+├── requirements.txt         # Python dependency specifications
+├── README.md                # Project documentation
+├── listener/                # Core Python library
+│   ├── analysis.py          # Signal analysis, windowing, and scoring logic
+│   ├── affect.py            # Affective tone transformation functions
+│   ├── audio_classifier.py  # PANNs CNN model loading & embedding extraction
+│   ├── audio_io.py          # Audio file loading, saving, and timestamp formatting
+│   ├── clipping.py          # Audio clip extraction and trimming utilities
+│   ├── composition.py       # Multi-clip composition rendering & crossfading
+│   ├── pipeline.py          # Verification and candidate generation pipeline
+│   ├── research_log.py      # Logging decision history and session snapshots
+│   └── selection.py         # Candidate selection and re-ranking algorithms
+└── data/                    # Temporary directory for saved clips & compositions
+Known limitations
 
----
-
-## 🔑 Optional Configuration
-
-- **API Key for Description Generation (Optional):**
-  If you have an Anthropic API Key, you can enable auto-generated textual descriptions by setting:
-  ```bash
-  export ANTHROPIC_API_KEY="your-api-key-here"
-  ```
-
----
-
-## 📄 License & Attribution
-
-Developed by the **Resonate Data Lab** team. Designed for interactive AI-human audio research, sound exploration, and affective acoustic analysis.
+Built for a single session and one recording of roughly thirty to forty-five minutes. It has no multi-user handling or session persistence. Acoustic boundaries are imperfect in continuous environments such as traffic or wind, repetitive recordings may not yield ten distinct candidates, affective transformations use fixed recipes, and audio is processed in mono.
